@@ -1,0 +1,112 @@
+import cv2
+import mediapipe as mp
+import pyautogui
+import math
+import numpy as np
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.8, min_tracking_confidence=0.8)
+mp_draw = mp.solutions.drawing_utils
+
+# Screen dimensions
+screen_width, screen_height = pyautogui.size()
+
+# Threshold for detecting a "click" gesture
+click_threshold = 40  # Pixels
+cursor_smoothing = 5  # Number of frames to average for cursor smoothing
+
+# Variables for smoothing
+prev_cursor_x, prev_cursor_y = 0, 0
+cursor_history = []
+
+# Start video capture
+cap = cv2.VideoCapture(0)
+
+# To prevent multiple clicks in a short time, use a flag
+click_flag = False
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Flip the frame horizontally for a mirror effect
+    frame = cv2.flip(frame, 1)
+
+    # Convert BGR to RGB
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Extract landmarks for index, middle, and thumb
+            index_tip = hand_landmarks.landmark[8]
+            middle_tip = hand_landmarks.landmark[12]
+            index_base = hand_landmarks.landmark[6]
+            thumb_tip = hand_landmarks.landmark[4]
+            thumb_base = hand_landmarks.landmark[2]
+
+            # Convert normalized positions to screen coordinates
+            index_x = int(index_tip.x * screen_width)
+            index_y = int(index_tip.y * screen_height)
+            frame_width, frame_height = frame.shape[1], frame.shape[0]
+
+            # Convert normalized positions to pixel coordinates for drawing
+            index_x_px, index_y_px = int(index_tip.x * frame_width), int(index_tip.y * frame_height)
+            middle_x_px, middle_y_px = int(middle_tip.x * frame_width), int(middle_tip.y * frame_height)
+            thumb_x_px, thumb_y_px = int(thumb_tip.x * frame_width), int(thumb_tip.y * frame_height)
+
+            # Draw circles for debugging
+            cv2.circle(frame, (index_x_px, index_y_px), 10, (0, 255, 0), -1)  # Index finger
+            cv2.circle(frame, (middle_x_px, middle_y_px), 10, (255, 0, 0), -1)  # Middle finger
+            cv2.circle(frame, (thumb_x_px, thumb_y_px), 10, (0, 0, 255), -1)  # Thumb
+
+            # Function to check if a finger is raised
+            def is_finger_raised(tip, base):
+                return tip.y < base.y  # Y decreases as we go up in the frame
+
+            is_index_raised = is_finger_raised(index_tip, index_base)
+            is_thumb_raised = is_finger_raised(thumb_tip, thumb_base)
+
+            # Calculate Euclidean distance between index and middle fingertips
+            distance = math.sqrt((middle_x_px - index_x_px) ** 2 + (middle_y_px - index_y_px) ** 2)
+
+            # Cursor movement with smoothing
+            if is_index_raised and distance >= click_threshold:
+                # Smooth cursor movement
+                if len(cursor_history) >= cursor_smoothing:
+                    cursor_history.pop(0)
+                cursor_history.append((index_x, index_y))
+
+                avg_x = int(np.mean([pos[0] for pos in cursor_history]))
+                avg_y = int(np.mean([pos[1] for pos in cursor_history]))
+
+                pyautogui.moveTo(avg_x, avg_y)
+                cv2.putText(frame, "Cursor Active", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                click_flag = False  # Reset click flag when fingers are apart
+
+            elif distance < click_threshold and not click_flag:
+                # If both fingers are close together, perform a click
+                pyautogui.click()
+                click_flag = True  # Set click flag to prevent multiple clicks
+                cv2.putText(frame, "Left Click", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+            # Quit program on "thumbs up" gesture
+            if is_thumb_raised and not is_index_raised:
+                cv2.putText(frame, "Thumbs Up - Exiting", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cap.release()
+                cv2.destroyAllWindows()
+                exit()
+
+    # Display the frame
+    cv2.imshow("Mouse Control with Thumbs Up Quit", frame)
+
+    # Press 'q' to exit manually (as a fallback)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
