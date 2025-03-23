@@ -1,0 +1,140 @@
+import cv2
+import mediapipe as mp
+import pyautogui
+import math
+import numpy as np
+import speech_recognition as sr
+import pyttsx3
+import os
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, 
+                      min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
+
+# Initialize speech engine
+engine = pyttsx3.init()
+
+# Screen dimensions
+screen_width, screen_height = pyautogui.size()
+
+# Thresholds
+click_threshold = 40  # Frame pixels for click detection
+cursor_smoothing = 5  # Frames to average for smoothing
+
+# Variables
+cursor_history = []
+click_flag = False
+
+# Voice command functions
+def listen_for_command():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening for command...")
+        audio = recognizer.listen(source)
+        try:
+            command = recognizer.recognize_google(audio).lower()
+            print(f"You said: {command}")
+            return command
+        except sr.UnknownValueError:
+            print("Sorry, I didn't understand that.")
+            return None
+
+def open_application(command):
+    apps = {
+        "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "word": "winword.exe",
+        "excel": "excel.exe",
+    }
+    for app_name, app_path in apps.items():
+        if app_name in command:
+            os.startfile(app_path)
+            engine.say(f"Opening {app_name}")
+            engine.runAndWait()
+            return True
+    return False
+
+# Start video capture
+cap = cv2.VideoCapture(0)
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Landmarks extraction
+            index_tip = hand_landmarks.landmark[8]
+            middle_tip = hand_landmarks.landmark[12]
+            index_base = hand_landmarks.landmark[6]
+            thumb_tip = hand_landmarks.landmark[4]
+            thumb_base = hand_landmarks.landmark[2]
+
+            # Convert to frame pixels
+            h, w = frame.shape[:2]
+            index_x_px = int(index_tip.x * w)
+            index_y_px = int(index_tip.y * h)
+            middle_x_px = int(middle_tip.x * w)
+            middle_y_px = int(middle_tip.y * h)
+
+            # Convert to screen coordinates for cursor movement
+            screen_x = int(index_tip.x * screen_width)
+            screen_y = int(index_tip.y * screen_height)
+
+            # Draw landmarks
+            cv2.circle(frame, (index_x_px, index_y_px), 10, (0, 255, 0), -1)
+            cv2.circle(frame, (middle_x_px, middle_y_px), 10, (255, 0, 0), -1)
+
+            # Finger raised check
+            def is_finger_raised(tip, base):
+                return tip.y < base.y
+
+            is_index_raised = is_finger_raised(index_tip, index_base)
+
+            # Calculate distance in FRAME PIXELS
+            distance = math.hypot(middle_x_px - index_x_px, middle_y_px - index_y_px)
+
+            # Cursor movement and click
+            if is_index_raised and distance >= click_threshold:
+                if len(cursor_history) >= cursor_smoothing:
+                    cursor_history.pop(0)
+                cursor_history.append((screen_x, screen_y))
+
+                avg_x = int(np.mean([x for x, y in cursor_history]))
+                avg_y = int(np.mean([y for x, y in cursor_history]))
+                pyautogui.moveTo(avg_x, avg_y)
+                cv2.putText(frame, "Cursor Active", (10, 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                click_flag = False
+
+            elif distance < click_threshold and not click_flag:
+                pyautogui.click()
+                click_flag = True
+                cv2.putText(frame, "Left Click", (10, 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.circle(frame, (index_x_px, index_y_px), 10, (0, 255, 255), -1)
+
+    # Press 'v' to trigger voice command
+    if cv2.waitKey(1) & 0xFF == ord('v'):
+        command = listen_for_command()
+        if command:
+            if not open_application(command):
+                engine.say("Application not found")
+                engine.runAndWait()
+
+    cv2.imshow("Hand Controlled Mouse with Voice Commands", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
