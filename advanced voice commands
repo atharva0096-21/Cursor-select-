@@ -1,0 +1,196 @@
+import cv2
+import mediapipe as mp
+import pyautogui
+import math
+import numpy as np
+import speech_recognition as sr
+import pyttsx3
+import os
+import time
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
+                      min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
+
+# Initialize speech engine
+engine = pyttsx3.init()
+
+# Screen dimensions
+screen_width, screen_height = pyautogui.size()
+
+# Thresholds
+click_threshold = 40  # Frame pixels for click detection
+cursor_smoothing = 5  # Frames to average for smoothing
+exit_gesture_frames = 30  # Number of frames to wait before exiting
+thumbs_up_hold_time = 2  # Seconds to hold thumbs up for voice command
+
+# Variables
+cursor_history = []
+click_flag = False
+exit_counter = 0
+thumbs_up_pressed_time = None
+
+# Voice command functions
+def listen_for_command():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening for command...")
+        audio = recognizer.listen(source)
+        try:
+            command = recognizer.recognize_google(audio).lower()
+            print(f"You said: {command}")
+            return command
+        except sr.UnknownValueError:
+            print("Sorry, I didn't understand that.")
+            return None
+
+def open_application(command):
+    apps = {
+        "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "word": "winword.exe",
+        "excel": "excel.exe",
+    }
+    for app_name, app_path in apps.items():
+        if app_name in command:
+            os.startfile(app_path)
+            engine.say(f"Opening {app_name}")
+            engine.runAndWait()
+            return True
+    return False
+
+# Function to check if a finger is raised
+def is_finger_raised(tip, base):
+    return tip.y < base.y
+
+# Function to check if all fingers are closed (closed fist)
+def is_closed_fist(hand_landmarks):
+    # Check if all fingertips are close to their corresponding base landmarks
+    fingertips = [4, 8, 12, 16, 20]  # Thumb, Index, Middle, Ring, Pinky
+    bases = [2, 6, 10, 14, 18]  # Thumb, Index, Middle, Ring, Pinky bases
+    for tip, base in zip(fingertips, bases):
+        tip_landmark = hand_landmarks.landmark[tip]
+        base_landmark = hand_landmarks.landmark[base]
+        if math.hypot(tip_landmark.x - base_landmark.x, tip_landmark.y - base_landmark.y) > 0.1:  # Adjust threshold as needed
+            return False
+    return True
+
+# Function to check if thumbs up gesture is detected
+def is_thumbs_up(hand_landmarks):
+    thumb_tip = hand_landmarks.landmark[4]
+    thumb_base = hand_landmarks.landmark[2]
+    index_tip = hand_landmarks.landmark[8]
+    middle_tip = hand_landmarks.landmark[12]
+    ring_tip = hand_landmarks.landmark[16]
+    pinky_tip = hand_landmarks.landmark[20]
+
+    # Check if thumb is raised and other fingers are closed
+    thumb_raised = is_finger_raised(thumb_tip, thumb_base)
+    other_fingers_closed = not is_finger_raised(index_tip, hand_landmarks.landmark[6]) and \
+                           not is_finger_raised(middle_tip, hand_landmarks.landmark[10]) and \
+                           not is_finger_raised(ring_tip, hand_landmarks.landmark[14]) and \
+                           not is_finger_raised(pinky_tip, hand_landmarks.landmark[18])
+
+    return thumb_raised and other_fingers_closed
+
+# Start video capture
+cap = cv2.VideoCapture(0)
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Landmarks extraction
+            index_tip = hand_landmarks.landmark[8]
+            middle_tip = hand_landmarks.landmark[12]
+            index_base = hand_landmarks.landmark[6]
+            thumb_tip = hand_landmarks.landmark[4]
+
+            # Convert to frame pixels
+            h, w = frame.shape[:2]
+            index_x_px = int(index_tip.x * w)
+            index_y_px = int(index_tip.y * h)
+            middle_x_px = int(middle_tip.x * w)
+            middle_y_px = int(middle_tip.y * h)
+
+            # Convert to screen coordinates for cursor movement
+            screen_x = int(index_tip.x * screen_width)
+            screen_y = int(index_tip.y * screen_height)
+
+            # Draw landmarks
+            cv2.circle(frame, (index_x_px, index_y_px), 10, (0, 255, 0), -1)
+            cv2.circle(frame, (middle_x_px, middle_y_px), 10, (255, 0, 0), -1)
+
+            # Finger raised check
+            is_index_raised = is_finger_raised(index_tip, index_base)
+
+            # Calculate distance in FRAME PIXELS
+            distance = math.hypot(middle_x_px - index_x_px, middle_y_px - index_y_px)
+
+            # Cursor movement and click
+            if is_index_raised and distance >= click_threshold:
+                if len(cursor_history) >= cursor_smoothing:
+                    cursor_history.pop(0)
+                cursor_history.append((screen_x, screen_y))
+
+                avg_x = int(np.mean([x for x, y in cursor_history]))
+                avg_y = int(np.mean([y for x, y in cursor_history]))
+                pyautogui.moveTo(avg_x, avg_y)
+                cv2.putText(frame, "Cursor Active", (10, 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                click_flag = False
+
+            elif distance < click_threshold and not click_flag:
+                pyautogui.click()
+                click_flag = True
+                cv2.putText(frame, "Left Click", (10, 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.circle(frame, (index_x_px, index_y_px), 10, (0, 255, 255), -1)
+
+            # Closed fist for exit with delay
+            if is_closed_fist(hand_landmarks):
+                exit_counter += 1
+                cv2.putText(frame, f"Exiting in {exit_gesture_frames - exit_counter}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                if exit_counter >= exit_gesture_frames:
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    exit()
+            else:
+                exit_counter = 0
+
+            # Thumbs up for voice command
+            if is_thumbs_up(hand_landmarks):
+                if thumbs_up_pressed_time is None:
+                    thumbs_up_pressed_time = time.time()  # Record the time when thumbs up is detected
+                else:
+                    if time.time() - thumbs_up_pressed_time >= thumbs_up_hold_time:
+                        cv2.putText(frame, "Voice Command Triggered", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                        engine.say("Voice command activated")  # Notify user
+                        engine.runAndWait()
+                        command = listen_for_command()
+                        if command:
+                            if not open_application(command):
+                                engine.say("Application not found")
+                                engine.runAndWait()
+                        thumbs_up_pressed_time = None  # Reset the timer
+            else:
+                thumbs_up_pressed_time = None  # Reset the timer if thumbs up is not detected
+
+    cv2.imshow("Hand Controlled Mouse with Voice Commands", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
